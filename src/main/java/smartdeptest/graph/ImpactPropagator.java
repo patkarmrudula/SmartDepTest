@@ -1,11 +1,36 @@
 package smartdeptest.graph;
 
 import java.util.ArrayDeque;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
 public final class ImpactPropagator {
+    public static ImpactAssessment assessMethod(
+            DependencyGraphResult result, String methodId) {
+        return assessMethod(
+                result == null ? Set.of() : result.directlyImpactedMethods(),
+                result == null ? Set.of() : result.indirectlyAffectedMethods(),
+                methodId);
+    }
+
+    public static ImpactAssessment assessMethod(
+            Collection<String> directlyImpacted,
+            Collection<String> indirectlyAffected,
+            String methodId) {
+        if (methodId == null || methodId.isBlank()) {
+            return new ImpactAssessment(RiskLevel.LOW, RiskLevel.LOW);
+        }
+        if (directlyImpacted != null && directlyImpacted.contains(methodId)) {
+            return new ImpactAssessment(RiskLevel.HIGH, RiskLevel.HIGH);
+        }
+        if (indirectlyAffected != null && indirectlyAffected.contains(methodId)) {
+            return new ImpactAssessment(RiskLevel.MEDIUM, RiskLevel.MEDIUM);
+        }
+        return new ImpactAssessment(RiskLevel.LOW, RiskLevel.LOW);
+    }
+
     public DependencyGraphResult propagate(DependencyGraphResult result) {
         Set<String> directlyImpacted = new LinkedHashSet<>(result.directlyImpactedMethods());
         Set<String> indirectlyAffected = new LinkedHashSet<>();
@@ -29,4 +54,12 @@ public final class ImpactPropagator {
             result.methodTestMapping(), result.selectedTests(), result.groupedSelectedTests(),
             result.testCoverageStatuses(), result.analysisSummary(), result.analysisDiagnostics());
     }
+
+    public enum RiskLevel {
+        HIGH,
+        MEDIUM,
+        LOW
+    }
+
+    public record ImpactAssessment(RiskLevel riskScore, RiskLevel confidenceLevel) {}
 }

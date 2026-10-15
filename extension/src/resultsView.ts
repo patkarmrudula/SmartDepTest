@@ -47,7 +47,18 @@ export class SmartDepTestResultsView implements vscode.TreeDataProvider<ResultIt
         if (!this.report) {
             return rows;
         }
+        const metrics = this.report.testSummary.evaluationMetrics;
         rows.push(
+            category("Evaluation metrics", [
+                new ResultItem("Total tests", value(metrics?.totalTestCount)),
+                new ResultItem("Selected tests", value(metrics?.selectedTestCount)),
+                new ResultItem("Test reduction", percentage(metrics?.testReductionPercentage)),
+                new ResultItem("Estimated execution time savings",
+                    percentage(metrics?.estimatedExecutionTimeSavingsPercentage)),
+                ...(metrics?.timeSavingsAssumption
+                    ? [new ResultItem(metrics.timeSavingsAssumption)]
+                    : []),
+            ]),
             category("Dependencies", this.report.dependencies.map(item =>
                 new ResultItem(`${value(item.groupId)}:${value(item.artifactId)}`,
                     `${value(item.oldVersion)} -> ${value(item.newVersion)} · ${value(item.status)}`))),
@@ -58,7 +69,7 @@ export class SmartDepTestResultsView implements vscode.TreeDataProvider<ResultIt
                 new ResultItem(method.displayName, `${method.classification} · ${method.reason}`))),
             category("Selected regression tests", this.report.tests.map(test =>
                 new ResultItem(`${test.testClass}#${test.testMethod}`,
-                    `${test.classification} · ${test.affectedMethods.length} affected methods`))),
+                    `${test.classification} · Risk ${value(test.riskScore)} · Confidence ${value(test.confidenceLevel)} · ${test.affectedMethods.length} affected methods`))),
             category("Warnings and errors", [
                 ...this.report.warnings.map(message => new ResultItem(message)),
                 ...this.report.errors.map(message => new ResultItem(message)),
@@ -74,4 +85,10 @@ function category(label: string, children: ResultItem[]): ResultItem {
 
 function value(value: unknown): string {
     return value === null || value === undefined || value === "" ? "Unavailable" : String(value);
+}
+
+function percentage(value: number | null | undefined): string {
+    return typeof value === "number" && Number.isFinite(value)
+        ? `${value.toFixed(1)}%`
+        : "Unavailable";
 }

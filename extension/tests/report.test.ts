@@ -79,6 +79,49 @@ test("standalone report includes every selected test", () => {
     assert.equal((html.match(/<article>/g) ?? []).length, 120);
 });
 
+test("risk, confidence, and evaluation metrics appear in both report views", () => {
+    const report: SmartDepReport = {
+        ...emptyReport,
+        tests: [{
+            id: "sample.Check#testRun",
+            testClass: "sample.Check",
+            testMethod: "testRun",
+            classification: "DIRECT",
+            riskScore: "HIGH",
+            confidenceLevel: "HIGH",
+            riskReason: "Directly reaches a changed API.",
+            source: { path: "", line: null },
+            affectedMethods: [],
+            callPaths: [],
+        }],
+        testSummary: {
+            ...emptyReport.testSummary,
+            selectedTests: 1,
+            evaluationMetrics: {
+                totalTestCount: 4,
+                selectedTestCount: 1,
+                testReductionPercentage: 75,
+                estimatedExecutionTimeSavingsPercentage: 75,
+                timeSavingsAssumption: "Assumes all tests take equal time.",
+            },
+        },
+    };
+
+    const standalone = buildStandaloneHtml(report);
+    const webview = buildWebviewHtml(report, "nonce");
+    assert.match(standalone, /Risk: HIGH/);
+    assert.match(standalone, /Confidence: HIGH/);
+    assert.match(standalone, /Test reduction/);
+    assert.match(standalone, /Estimated execution time savings/);
+    assert.match(standalone, /75\.0%/);
+    assert.match(standalone, /Assumes all tests take equal time/);
+    assert.match(webview, /riskScore/);
+    assert.match(webview, /confidenceLevel/);
+    assert.match(webview, /Estimated execution time savings/);
+    assert.match(webview, /estimatedExecutionTimeSavingsPercentage/);
+    assert.match(webview, /toFixed\(1\)/);
+});
+
 test("standalone report escapes dynamic HTML content", () => {
     const report = {
         ...emptyReport,

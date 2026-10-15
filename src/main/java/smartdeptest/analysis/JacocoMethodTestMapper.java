@@ -4,6 +4,7 @@ import smartdeptest.graph.DependencyGraph;
 import smartdeptest.graph.DependencyGraphResult;
 import smartdeptest.graph.GraphEdge;
 import smartdeptest.graph.GraphNode;
+import smartdeptest.graph.ImpactPropagator;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ConstantDynamic;
@@ -38,6 +39,64 @@ public final class JacocoMethodTestMapper {
     private static final String STATIC_SELECTION_NOTE =
             "Selection uses statically traceable test-bytecode call paths, not runtime coverage. "
                     + "JaCoCo execution data is not used.";
+
+    public static TestRiskAssessment assessTest(
+            DependencyGraphResult impactResult,
+            Set<String> affectedMethods,
+            Set<String> methodsWithCallPaths) {
+        boolean directlyAffected = false;
+        boolean indirectlyAffected = false;
+        boolean directCallPath = false;
+        boolean indirectCallPath = false;
+        if (impactResult != null && affectedMethods != null) {
+            for (String methodId : affectedMethods) {
+                ImpactPropagator.ImpactAssessment assessment =
+                        ImpactPropagator.assessMethod(impactResult, methodId);
+                if (assessment.riskScore() == ImpactPropagator.RiskLevel.HIGH) {
+                    directlyAffected = true;
+                    directCallPath |= methodsWithCallPaths != null
+                            && methodsWithCallPaths.contains(methodId);
+                } else if (assessment.riskScore() == ImpactPropagator.RiskLevel.MEDIUM) {
+                    indirectlyAffected = true;
+                    indirectCallPath |= methodsWithCallPaths != null
+                            && methodsWithCallPaths.contains(methodId);
+                }
+            }
+        }
+
+        if (directlyAffected) {
+            return new TestRiskAssessment(
+                    ImpactPropagator.RiskLevel.HIGH,
+                    directCallPath
+                            ? ImpactPropagator.RiskLevel.HIGH
+                            : ImpactPropagator.RiskLevel.MEDIUM,
+                    "The test statically reaches an application method that directly uses a changed dependency API.");
+        }
+        if (indirectlyAffected) {
+            return new TestRiskAssessment(
+                    ImpactPropagator.RiskLevel.MEDIUM,
+                    indirectCallPath
+                            ? ImpactPropagator.RiskLevel.MEDIUM
+                            : ImpactPropagator.RiskLevel.LOW,
+                    "The test reaches an affected method through a transitive application call path.");
+        }
+        return new TestRiskAssessment(
+                ImpactPropagator.RiskLevel.LOW,
+                ImpactPropagator.RiskLevel.LOW,
+                "Available static evidence does not confirm a direct or transitive path to a changed API.");
+    }
+
+    public record TestRiskAssessment(
+            ImpactPropagator.RiskLevel riskScore,
+            ImpactPropagator.RiskLevel confidenceLevel,
+            String reason) {
+        public TestRiskAssessment {
+            riskScore = riskScore == null ? ImpactPropagator.RiskLevel.LOW : riskScore;
+            confidenceLevel = confidenceLevel == null
+                    ? ImpactPropagator.RiskLevel.LOW : confidenceLevel;
+            reason = reason == null ? "" : reason;
+        }
+    }
 
     public CoverageResult map(
             Path projectDirectory,

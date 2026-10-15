@@ -5,6 +5,7 @@ import smartdeptest.graph.DependencyGraph;
 import smartdeptest.graph.DependencyGraphResult;
 import smartdeptest.graph.GraphEdge;
 import smartdeptest.graph.GraphNode;
+import smartdeptest.graph.ImpactPropagator;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -132,18 +133,24 @@ public final class ImpactReportJsonExporter {
             } else {
                 indirectlyAffectedTests++;
             }
+            Map<String, Object> testPaths = pathsByTestAndMethod.getOrDefault(
+                    testId, Map.of());
+            JacocoMethodTestMapper.TestRiskAssessment risk =
+                    JacocoMethodTestMapper.assessTest(
+                            graphResult, methodIds, testPaths.keySet());
 
             Map<String, Object> test = new LinkedHashMap<>();
             test.put("id", testId);
             test.put("testClass", testClass);
             test.put("testMethod", testMethod);
             test.put("classification", isDirect ? "DIRECT" : "INDIRECT");
+            test.put("riskScore", risk.riskScore().name());
+            test.put("confidenceLevel", risk.confidenceLevel().name());
+            test.put("riskReason", risk.reason());
             test.put("source", sourceLocation(
                     projectRoot, testClass, testMethod, true));
             List<Map<String, Object>> testAffectedMethods = new ArrayList<>();
             List<List<String>> callPaths = new ArrayList<>();
-            Map<String, Object> testPaths = pathsByTestAndMethod.getOrDefault(
-                    testId, Map.of());
             for (String methodId : methodIds) {
                 Map<String, Object> method = methodsById.get(methodId);
                 if (method != null) {
@@ -192,6 +199,17 @@ public final class ImpactReportJsonExporter {
         summary.put("indirectlyAffectedTests", indirectlyAffectedTests);
         summary.put("notSelectedTests", availableTestCount == null ? null
                 : Math.max(0, availableTestCount - selectedTests.size()));
+        Map<String, Object> evaluationMetrics = new LinkedHashMap<>();
+        evaluationMetrics.put("totalTestCount", availableTestCount);
+        evaluationMetrics.put("selectedTestCount", selectedTests.size());
+        Double reductionPercentage = percentageReduction(
+                availableTestCount, selectedTests.size());
+        evaluationMetrics.put("testReductionPercentage", reductionPercentage);
+        evaluationMetrics.put("estimatedExecutionTimeSavingsPercentage", reductionPercentage);
+        evaluationMetrics.put("timeSavingsAssumption",
+                "Estimated from test-count reduction; assumes all tests take equal time. "
+                        + "Per-test execution timings are not available.");
+        summary.put("evaluationMetrics", evaluationMetrics);
         summary.put("unresolvedMappings", coverage.groupedSelectedTests().stream()
                 .filter(group -> !"SELECTED".equals(group.selectionStatus()))
                 .map(group -> Map.of(
@@ -260,12 +278,25 @@ public final class ImpactReportJsonExporter {
         method.put("displayName", className + "." + methodName + descriptor);
         method.put("classification", directMethods.contains(methodId)
                 ? "DIRECT" : indirectMethods.contains(methodId) ? "INDIRECT" : "UNKNOWN");
+        ImpactPropagator.ImpactAssessment assessment =
+                ImpactPropagator.assessMethod(
+                        directMethods, indirectMethods, methodId);
+        method.put("riskScore", assessment.riskScore().name());
+        method.put("confidenceLevel", assessment.confidenceLevel().name());
         method.put("reason", directMethods.contains(methodId)
                 ? "Bytecode in this method references a changed dependency API."
                 : "This method calls an application method that directly references a changed dependency API.");
         method.put("source", sourceLocation(
                 root, modulePath, className, methodName, false));
         return method;
+    }
+
+    private static Double percentageReduction(Integer totalTests, int selectedTests) {
+        if (totalTests == null || totalTests <= 0) {
+            return null;
+        }
+        int testsSaved = Math.max(0, totalTests - selectedTests);
+        return Math.round(testsSaved * 10_000.0 / totalTests) / 100.0;
     }
 
     private static String findChangeType(

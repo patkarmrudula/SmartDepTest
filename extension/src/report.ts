@@ -19,6 +19,9 @@ export interface SelectedTest {
     testClass: string;
     testMethod: string;
     classification: "DIRECT" | "INDIRECT";
+    riskScore?: "HIGH" | "MEDIUM" | "LOW";
+    confidenceLevel?: "HIGH" | "MEDIUM" | "LOW";
+    riskReason?: string;
     source: SourceLocation;
     affectedMethods: AffectedMethod[];
     callPaths: string[][];
@@ -43,6 +46,13 @@ export interface SmartDepReport {
         directlyAffectedTests: number;
         indirectlyAffectedTests: number;
         notSelectedTests: number | null;
+        evaluationMetrics?: {
+            totalTestCount: number | null;
+            selectedTestCount: number;
+            testReductionPercentage: number | null;
+            estimatedExecutionTimeSavingsPercentage: number | null;
+            timeSavingsAssumption?: string;
+        };
         unresolvedMappings: Array<Record<string, unknown>>;
         selectionEvidence: string;
     };
@@ -78,6 +88,12 @@ function safeJson(value: unknown): string {
         .replace(/\u2029/g, "\\u2029");
 }
 
+function formatPercentage(value: number | null | undefined): string {
+    return typeof value === "number" && Number.isFinite(value)
+        ? `${value.toFixed(1)}%`
+        : "Not available";
+}
+
 export function buildWebviewHtml(report: SmartDepReport, nonce: string): string {
     const serialized = safeJson(report);
     return `<!DOCTYPE html>
@@ -108,6 +124,7 @@ const vscode=acquireVsCodeApi();
 const root=document.getElementById('report');
 let expanded=false;
 const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=String(text);if(cls)n.className=cls;return n;};
+const percent=value=>typeof value==='number'&&Number.isFinite(value)?value.toFixed(1)+'%':'Not available';
 const section=(title)=>{const s=el('section');s.appendChild(el('h2',title));root.appendChild(s);return s;};
 const open=(loc,label)=>{if(!loc||!loc.path){return;}const b=el('button',label,'secondary');b.addEventListener('click',()=>vscode.postMessage({type:'open',path:loc.path,line:loc.line}));return b;};
 const showLocation=(parent,loc)=>{if(loc&&loc.path){const p=el('div',loc.path+(loc.line?' :'+loc.line:''),'muted path');parent.appendChild(p);}};
@@ -127,12 +144,13 @@ report.changedApis.forEach(api=>{const e=el('div',undefined,'entry');e.appendChi
 const methods=section('Affected application methods');if(!report.affectedMethods.length)methods.appendChild(el('p','No affected application methods were identified.','empty'));report.affectedMethods.forEach(m=>{const e=el('div',undefined,'entry');e.appendChild(el('h3',m.displayName+'  ·  '+m.classification));e.appendChild(el('div',m.reason,'muted'));showLocation(e,m.source);const action=open(m.source,'Open application method');if(action)e.appendChild(action);methods.appendChild(e);});
 const tests=section('Selected tests');
 const sums=el('table',undefined,'summary');const sumBody=el('tbody');
-[['Available tests',report.testSummary.availableTests],['Unique selected',report.testSummary.selectedTests],['Directly affected',report.testSummary.directlyAffectedTests],['Indirectly affected',report.testSummary.indirectlyAffectedTests],['Not selected',report.testSummary.notSelectedTests]].forEach(([k,v])=>{const row=el('tr');row.appendChild(el('th',k));row.appendChild(el('td',v===null?'Not available':v));sumBody.appendChild(row);});
+[['Available tests',report.testSummary.availableTests],['Unique selected',report.testSummary.selectedTests],['Directly affected',report.testSummary.directlyAffectedTests],['Indirectly affected',report.testSummary.indirectlyAffectedTests],['Not selected',report.testSummary.notSelectedTests],['Test reduction',percent(report.testSummary.evaluationMetrics?.testReductionPercentage)],['Estimated execution time savings',percent(report.testSummary.evaluationMetrics?.estimatedExecutionTimeSavingsPercentage)]].forEach(([k,v])=>{const row=el('tr');row.appendChild(el('th',k));row.appendChild(el('td',v===null?'Not available':v));sumBody.appendChild(row);});
 sums.appendChild(sumBody);tests.appendChild(sums);
+if(report.testSummary.evaluationMetrics?.timeSavingsAssumption)tests.appendChild(el('p',report.testSummary.evaluationMetrics.timeSavingsAssumption,'muted'));
 if(report.testSummary.selectionEvidence)tests.appendChild(el('p',report.testSummary.selectionEvidence,'muted'));
 const testList=el('div');tests.appendChild(testList);const toggle=el('button');toggle.className='secondary';
 if(!report.tests.length)tests.appendChild(el('p','No tests were selected by static call-path analysis.','empty'));
-const renderTests=()=>{testList.replaceChildren();const count=expanded?report.tests.length:Math.min(3,report.tests.length);report.tests.slice(0,count).forEach(t=>{const e=el('article',undefined,'entry');e.appendChild(el('h3',t.testClass+'#'+t.testMethod));e.appendChild(el('span',t.classification,'tag'));showLocation(e,t.source);const actions=el('div',undefined,'test-actions');const testAction=open(t.source,'Open test');if(testAction)actions.appendChild(testAction);e.appendChild(actions);if(t.affectedMethods.length){e.appendChild(el('div','Affected application methods'));t.affectedMethods.forEach(m=>{const row=el('div',undefined,'api-method');row.appendChild(el('div',m.displayName+'  ·  '+m.classification));showLocation(row,m.source);const action=open(m.source,'Open application method');if(action)row.appendChild(action);e.appendChild(row);});}if(t.callPaths.length){e.appendChild(el('div','Static call path evidence'));t.callPaths.forEach(p=>e.appendChild(el('div',p.join(' → '),'callpath path')));}else e.appendChild(el('div','A static test-to-method association was found, but its individual call path was not retained.','muted'));testList.appendChild(e);});toggle.hidden=report.tests.length<=3;if(!toggle.hidden)toggle.textContent=expanded?'Show less':'Show all '+report.tests.length+' tests';};
+const renderTests=()=>{testList.replaceChildren();const count=expanded?report.tests.length:Math.min(3,report.tests.length);report.tests.slice(0,count).forEach(t=>{const e=el('article',undefined,'entry');e.appendChild(el('h3',t.testClass+'#'+t.testMethod));e.appendChild(el('span',t.classification,'tag'));e.appendChild(el('span','Risk: '+(t.riskScore||'Unavailable')+' · Confidence: '+(t.confidenceLevel||'Unavailable'),'tag'));if(t.riskReason)e.appendChild(el('div',t.riskReason,'muted'));showLocation(e,t.source);const actions=el('div',undefined,'test-actions');const testAction=open(t.source,'Open test');if(testAction)actions.appendChild(testAction);e.appendChild(actions);if(t.affectedMethods.length){e.appendChild(el('div','Affected application methods'));t.affectedMethods.forEach(m=>{const row=el('div',undefined,'api-method');row.appendChild(el('div',m.displayName+'  ·  '+m.classification));showLocation(row,m.source);const action=open(m.source,'Open application method');if(action)row.appendChild(action);e.appendChild(row);});}if(t.callPaths.length){e.appendChild(el('div','Static call path evidence'));t.callPaths.forEach(p=>e.appendChild(el('div',p.join(' → '),'callpath path')));}else e.appendChild(el('div','A static test-to-method association was found, but its individual call path was not retained.','muted'));testList.appendChild(e);});toggle.hidden=report.tests.length<=3;if(!toggle.hidden)toggle.textContent=expanded?'Show less':'Show all '+report.tests.length+' tests';};
 toggle.addEventListener('click',()=>{expanded=!expanded;renderTests();});tests.appendChild(toggle);renderTests();
 const unresolved=section('Unresolved mappings');if(!report.testSummary.unresolvedMappings.length)unresolved.appendChild(el('p','No unresolved affected-method mappings.','muted'));report.testSummary.unresolvedMappings.forEach(item=>unresolved.appendChild(el('p',item.applicationMethod+' · '+item.status+' · '+item.reason)));
 const warnings=section('Warnings');if(!report.warnings.length)warnings.appendChild(el('p','No warnings reported.','muted'));report.warnings.forEach(w=>warnings.appendChild(el('div',w,'warning')));report.errors.forEach(e=>warnings.appendChild(el('div',e,'error')));
@@ -143,13 +161,22 @@ if(report.baseline){const baseline=section('Research comparison');baseline.appen
 }
 
 export function buildStandaloneHtml(report: SmartDepReport): string {
-    const summaryRows = [
+    const summaryValues: Array<[string, string | number | null]> = [
         ["Available tests", report.testSummary.availableTests],
         ["Unique selected", report.testSummary.selectedTests],
         ["Directly affected", report.testSummary.directlyAffectedTests],
         ["Indirectly affected", report.testSummary.indirectlyAffectedTests],
         ["Not selected", report.testSummary.notSelectedTests],
-    ].map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value === null ? "Not available" : value)}</td></tr>`).join("");
+    ];
+    if (report.testSummary.evaluationMetrics) {
+        summaryValues.push(
+            ["Test reduction", formatPercentage(report.testSummary.evaluationMetrics.testReductionPercentage)],
+            ["Estimated execution time savings", formatPercentage(
+                report.testSummary.evaluationMetrics.estimatedExecutionTimeSavingsPercentage)],
+        );
+    }
+    const summaryRows = summaryValues.map(([label, value]) =>
+        `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value === null ? "Not available" : value)}</td></tr>`).join("");
     const dependencies = report.dependencies.map(d =>
         `<li><strong>${escapeHtml(d.groupId)}:${escapeHtml(d.artifactId)}</strong> ${escapeHtml(d.oldVersion || "(none)")} → ${escapeHtml(d.newVersion || "(none)")} · ${escapeHtml(d.status)}${d.message ? `<p>${escapeHtml(d.message)}</p>` : ""}</li>`).join("");
     const apis = report.changedApis.map(api => {
@@ -160,7 +187,7 @@ export function buildStandaloneHtml(report: SmartDepReport): string {
     const affectedMethods = report.affectedMethods.map(method =>
         `<li><strong>${escapeHtml(method.displayName)}</strong> · ${escapeHtml(method.classification)}<p>${escapeHtml(method.reason)}</p>${sourceHtml(method.source)}</li>`).join("");
     const tests = report.tests.map(test =>
-        `<article><h3>${escapeHtml(test.testClass)}#${escapeHtml(test.testMethod)} <small>${escapeHtml(test.classification)}</small></h3>${sourceHtml(test.source)}<p>Affected methods:</p><ul>${test.affectedMethods.map(method => `<li>${escapeHtml(method.displayName)} · ${escapeHtml(method.classification)}${sourceHtml(method.source)}</li>`).join("")}</ul><p>Static call paths:</p><ul>${test.callPaths.map(path => `<li>${path.map(escapeHtml).join(" → ")}</li>`).join("") || "<li>Association found; individual call path not retained.</li>"}</ul></article>`).join("");
+        `<article><h3>${escapeHtml(test.testClass)}#${escapeHtml(test.testMethod)} <small>${escapeHtml(test.classification)}</small></h3><p>Risk: ${escapeHtml(test.riskScore || "Unavailable")} · Confidence: ${escapeHtml(test.confidenceLevel || "Unavailable")}</p>${test.riskReason ? `<p>${escapeHtml(test.riskReason)}</p>` : ""}${sourceHtml(test.source)}<p>Affected methods:</p><ul>${test.affectedMethods.map(method => `<li>${escapeHtml(method.displayName)} · ${escapeHtml(method.classification)}${sourceHtml(method.source)}</li>`).join("")}</ul><p>Static call paths:</p><ul>${test.callPaths.map(path => `<li>${path.map(escapeHtml).join(" → ")}</li>`).join("") || "<li>Association found; individual call path not retained.</li>"}</ul></article>`).join("");
     const warnings = [...report.warnings, ...report.errors].map(w => `<li>${escapeHtml(w)}</li>`).join("");
     const baseline = report.baseline ? `<section><h2>Research comparison</h2><p>Baseline technique: ${escapeHtml(report.baseline.technique || "Not specified")} · Baseline selected: ${escapeHtml(report.baseline.selectedTests)} · SmartDepTest selected: ${escapeHtml(report.testSummary.selectedTests)}.</p>${report.baseline.selectedTests === 0 ? "<p>Percentage reduction is undefined for a zero-test baseline.</p>" : `<p>Reduction: ${escapeHtml(report.baseline.selectedTests - report.testSummary.selectedTests)} tests (${(((report.baseline.selectedTests - report.testSummary.selectedTests) / report.baseline.selectedTests) * 100).toFixed(1)}%).</p>`}<ul>${(report.baseline.missedRelevantTests || []).map(x => `<li>Known missed relevant test: ${escapeHtml(x)}</li>`).join("")}${(report.baseline.limitations || []).map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul></section>` : "";
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartDepTest Impact Report</title><style>
@@ -169,7 +196,7 @@ body{font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;color:#202733;
 <section><h2>Dependency update</h2><ul>${dependencies || "<li>No dependency updates.</li>"}</ul></section>
 <section><h2>Changed APIs and affected application methods</h2><ul>${apis || "<li>No changed API records.</li>"}</ul></section>
 <section><h2>Affected application methods (${report.affectedMethods.length})</h2><ul>${affectedMethods || "<li>No affected application methods were identified.</li>"}</ul></section>
-<section><h2>Test-selection summary</h2><table>${summaryRows}</table><p>${escapeHtml(report.testSummary.selectionEvidence)}</p></section>
+<section><h2>Test-selection summary</h2><table>${summaryRows}</table>${report.testSummary.evaluationMetrics?.timeSavingsAssumption ? `<p>${escapeHtml(report.testSummary.evaluationMetrics.timeSavingsAssumption)}</p>` : ""}<p>${escapeHtml(report.testSummary.selectionEvidence)}</p></section>
 <section><h2>Selected tests (${report.tests.length})</h2>${tests || "<p>No tests were selected.</p>"}</section>
 <section><h2>Unresolved mappings</h2><ul>${report.testSummary.unresolvedMappings.map(item => `<li>${escapeHtml(item.applicationMethod)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason)}</li>`).join("") || "<li>None reported.</li>"}</ul></section>
 <section><h2>Warnings and errors</h2><ul>${warnings || "<li>None reported.</li>"}</ul></section>${baseline}

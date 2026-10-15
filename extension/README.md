@@ -50,6 +50,10 @@ The Webview shows the first three unique selected tests and expands the full
 list with **Show all N tests**. **Download Report** saves a standalone HTML
 file containing all selected tests. Source links are provided only when a
 source file exists; an unavailable line opens the file without a selection.
+Selected tests include a direct/transitive risk rating and confidence level
+based on static call-path evidence. Evaluation metrics show test reduction and
+estimated execution-time savings as percentages; the time estimate assumes
+equal test durations because per-test runtime measurements are not collected.
 
 To create a downloadable VS Code installer (`.vsix`), build the Java engine
 from the repository root, then run `npm install` and `npm run package` from
