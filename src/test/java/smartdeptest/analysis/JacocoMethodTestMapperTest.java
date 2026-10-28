@@ -172,9 +172,8 @@ class JacocoMethodTestMapperTest {
         String method = methodId(
                 RealApplication.class.getName(), "run", "()V");
         DependencyGraph graph = new DependencyGraph();
-        graph.addNode(moduleMethodNode(
-                method, RealApplication.class.getName(), "run", "()V",
-                temporaryDirectory));
+        graph.addNode(methodNode(
+                method, RealApplication.class.getName(), "run", "()V"));
         DependencyGraphResult impact = new DependencyGraphResult(
                 graph, List.of(), List.of(), List.of(method), List.of(), List.of(method));
 
@@ -185,6 +184,156 @@ class JacocoMethodTestMapperTest {
                 RealApplicationTest.class.getName() + "#testRunsApplicationMethod"),
                 coverage.selectedTests());
         assertEquals(method, coverage.methodTestCoverage().get(0).applicationMethod());
+    }
+
+    @Test
+    void followsTestHelpersCompiledInAnotherMavenModule() throws Exception {
+        Path appModule = temporaryDirectory.resolve("app");
+        Path helpersModule = temporaryDirectory.resolve("helpers");
+        Path testsModule = temporaryDirectory.resolve("tests");
+        Path applicationClasses = appModule.resolve("target/classes");
+        Path helperClasses = helpersModule.resolve("target/test-classes");
+        Path testClasses = testsModule.resolve("target/test-classes");
+        Files.createDirectories(applicationClasses);
+        Files.createDirectories(helperClasses);
+        Files.createDirectories(testClasses);
+        Files.writeString(temporaryDirectory.resolve("pom.xml"),
+                "<project><modules><module>app</module><module>helpers</module>"
+                        + "<module>tests</module></modules></project>",
+                StandardCharsets.UTF_8);
+        for (Path module : List.of(appModule, helpersModule, testsModule)) {
+            Files.writeString(module.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        }
+        copyClass(RealApplication.class, applicationClasses);
+        copyClass(CrossModuleHelper.class, helperClasses);
+        copyClass(CrossModuleTest.class, testClasses);
+
+        String affected = methodId(RealApplication.class.getName(), "run", "()V");
+        DependencyGraph graph = new DependencyGraph();
+        graph.addNode(moduleMethodNode(
+                affected, RealApplication.class.getName(), "run", "()V", appModule));
+        DependencyGraphResult impact = new DependencyGraphResult(
+                graph, List.of(), List.of(), List.of(affected), List.of(), List.of(affected));
+
+        JacocoMethodTestMapper.CoverageResult coverage =
+                new JacocoMethodTestMapper().map(temporaryDirectory, impact);
+
+        assertEquals(List.of(CrossModuleTest.class.getName() + "#testCallsHelper"),
+                coverage.selectedTests());
+        assertEquals(affected, coverage.methodTestCoverage().get(0).applicationMethod());
+    }
+
+    @Test
+    void resolvesInterfaceCallsToAffectedApplicationImplementations() throws Exception {
+        Path appModule = temporaryDirectory.resolve("app");
+        Path testsModule = temporaryDirectory.resolve("tests");
+        Path applicationClasses = appModule.resolve("target/classes");
+        Path testClasses = testsModule.resolve("target/test-classes");
+        Files.createDirectories(applicationClasses);
+        Files.createDirectories(testClasses);
+        Files.writeString(temporaryDirectory.resolve("pom.xml"),
+                "<project><modules><module>app</module><module>tests</module></modules></project>",
+                StandardCharsets.UTF_8);
+        Files.writeString(appModule.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        Files.writeString(testsModule.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        copyClass(DispatchApi.class, applicationClasses);
+        copyClass(DispatchImplementation.class, applicationClasses);
+        copyClass(DispatchTest.class, testClasses);
+
+        String affected = methodId(
+                DispatchImplementation.class.getName(), "run", "()V");
+        DependencyGraph graph = new DependencyGraph();
+        graph.addNode(moduleMethodNode(
+                affected, DispatchImplementation.class.getName(), "run", "()V", appModule));
+        DependencyGraphResult impact = new DependencyGraphResult(
+                graph, List.of(), List.of(), List.of(affected), List.of(), List.of(affected));
+
+        JacocoMethodTestMapper.CoverageResult coverage =
+                new JacocoMethodTestMapper().map(temporaryDirectory, impact);
+
+        assertEquals(List.of(DispatchTest.class.getName() + "#testDispatch"),
+                coverage.selectedTests());
+    }
+
+    @Test
+    void identifiesInheritedJUnit5MethodsAsTestsOfTheConcreteClass() throws Exception {
+        Path applicationClasses = temporaryDirectory.resolve("target/classes");
+        Path testClasses = temporaryDirectory.resolve("target/test-classes");
+        Files.createDirectories(applicationClasses);
+        Files.createDirectories(testClasses);
+        Files.writeString(temporaryDirectory.resolve("pom.xml"),
+                "<project><modules/></project>", StandardCharsets.UTF_8);
+        copyClass(RealApplication.class, applicationClasses);
+        copyClass(InheritedTestBase.class, testClasses);
+        copyClass(ConcreteInheritedTest.class, testClasses);
+
+        String affected = methodId(RealApplication.class.getName(), "run", "()V");
+        DependencyGraph graph = new DependencyGraph();
+        graph.addNode(moduleMethodNode(
+                affected, RealApplication.class.getName(), "run", "()V", temporaryDirectory));
+        DependencyGraphResult impact = new DependencyGraphResult(
+                graph, List.of(), List.of(), List.of(affected), List.of(), List.of(affected));
+
+        JacocoMethodTestMapper.CoverageResult coverage =
+                new JacocoMethodTestMapper().map(temporaryDirectory, impact);
+
+        assertEquals(List.of(
+                ConcreteInheritedTest.class.getName() + "#inheritedTest"),
+                coverage.selectedTests());
+    }
+
+    @Test
+    void preservesDescriptorIdentityForOverloadedTestMethods() throws Exception {
+        Path applicationClasses = temporaryDirectory.resolve("target/classes");
+        Path testClasses = temporaryDirectory.resolve("target/test-classes");
+        Files.createDirectories(applicationClasses);
+        Files.createDirectories(testClasses);
+        Files.writeString(temporaryDirectory.resolve("pom.xml"),
+                "<project><modules/></project>", StandardCharsets.UTF_8);
+        copyClass(RealApplication.class, applicationClasses);
+        writeOverloadedAnnotatedTests(testClasses.resolve("fixture/OverloadedTest.class"));
+
+        String affected = methodId(RealApplication.class.getName(), "run", "()V");
+        DependencyGraph graph = new DependencyGraph();
+        graph.addNode(moduleMethodNode(
+                affected, RealApplication.class.getName(), "run", "()V", temporaryDirectory));
+        DependencyGraphResult impact = new DependencyGraphResult(
+                graph, List.of(), List.of(), List.of(affected), List.of(), List.of(affected));
+
+        JacocoMethodTestMapper.CoverageResult coverage =
+                new JacocoMethodTestMapper().map(temporaryDirectory, impact);
+
+        assertEquals(List.of(
+                        "fixture.OverloadedTest#testSameName()V",
+                        "fixture.OverloadedTest#testSameName(I)V"),
+                coverage.selectedTests());
+        assertEquals(2, coverage.methodTestCoverage().size());
+    }
+
+    @Test
+    void discoversJUnit4AnnotatedTestBytecode() throws Exception {
+        Path applicationClasses = temporaryDirectory.resolve("target/classes");
+        Path testClasses = temporaryDirectory.resolve("target/test-classes");
+        Files.createDirectories(applicationClasses);
+        Files.createDirectories(testClasses);
+        Files.writeString(temporaryDirectory.resolve("pom.xml"),
+                "<project><modules/></project>", StandardCharsets.UTF_8);
+        copyClass(RealApplication.class, applicationClasses);
+        writeSingleAnnotatedTest(
+                testClasses.resolve("fixture/JUnit4Test.class"),
+                "fixture/JUnit4Test", "legacyTest", "Lorg/junit/Test;");
+
+        String affected = methodId(RealApplication.class.getName(), "run", "()V");
+        DependencyGraph graph = new DependencyGraph();
+        graph.addNode(moduleMethodNode(
+                affected, RealApplication.class.getName(), "run", "()V", temporaryDirectory));
+        DependencyGraphResult impact = new DependencyGraphResult(
+                graph, List.of(), List.of(), List.of(affected), List.of(), List.of(affected));
+
+        JacocoMethodTestMapper.CoverageResult coverage =
+                new JacocoMethodTestMapper().map(temporaryDirectory, impact);
+
+        assertEquals(List.of("fixture.JUnit4Test#legacyTest"), coverage.selectedTests());
     }
 
     @Test
@@ -349,5 +498,95 @@ class JacocoMethodTestMapperTest {
         public void testRunsApplicationMethod() {
             RealApplication.run();
         }
+    }
+
+    static final class CrossModuleHelper {
+        static void invoke() {
+            RealApplication.run();
+        }
+    }
+
+    static final class CrossModuleTest {
+        @Test
+        public void testCallsHelper() {
+            CrossModuleHelper.invoke();
+        }
+    }
+
+    interface DispatchApi {
+        void run();
+    }
+
+    static final class DispatchImplementation implements DispatchApi {
+        @Override
+        public void run() {
+        }
+    }
+
+    static final class DispatchTest {
+        @Test
+        public void testDispatch() {
+            DispatchApi target = new DispatchImplementation();
+            target.run();
+        }
+    }
+
+    static abstract class InheritedTestBase {
+        @Test
+        public void inheritedTest() {
+            RealApplication.run();
+        }
+    }
+
+    static final class ConcreteInheritedTest extends InheritedTestBase {
+    }
+
+    private static void writeOverloadedAnnotatedTests(Path path) throws Exception {
+        ClassWriter writer = new ClassWriter(0);
+        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "fixture/OverloadedTest",
+                null, "java/lang/Object", null);
+        writeAnnotatedMethod(
+                writer, "testSameName", "()V", false, "Lorg/testng/annotations/Test;");
+        writeAnnotatedMethod(
+                writer, "testSameName", "(I)V", true, "Lorg/testng/annotations/Test;");
+        writer.visitEnd();
+        Files.createDirectories(path.getParent());
+        Files.write(path, writer.toByteArray());
+    }
+
+    private static void writeSingleAnnotatedTest(
+            Path path, String className, String methodName, String annotationDescriptor)
+            throws Exception {
+        ClassWriter writer = new ClassWriter(0);
+        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, className,
+                null, "java/lang/Object", null);
+        writeAnnotatedMethod(
+                writer, methodName, "()V", false, annotationDescriptor);
+        writer.visitEnd();
+        Files.createDirectories(path.getParent());
+        Files.write(path, writer.toByteArray());
+    }
+
+    private static void writeAnnotatedMethod(
+            ClassWriter writer,
+            String name,
+            String descriptor,
+            boolean takesInt,
+            String annotationDescriptor) {
+        var method = writer.visitMethod(Opcodes.ACC_PUBLIC, name, descriptor, null, null);
+        method.visitAnnotation(annotationDescriptor, true).visitEnd();
+        method.visitCode();
+        if (takesInt) {
+            method.visitInsn(Opcodes.ICONST_0);
+        }
+        method.visitMethodInsn(
+                Opcodes.INVOKESTATIC,
+                RealApplication.class.getName().replace('.', '/'),
+                "run",
+                "()V",
+                false);
+        method.visitInsn(Opcodes.RETURN);
+        method.visitMaxs(takesInt ? 1 : 0, takesInt ? 2 : 1);
+        method.visitEnd();
     }
 }

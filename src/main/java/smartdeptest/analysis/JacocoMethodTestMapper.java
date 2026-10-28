@@ -228,14 +228,11 @@ public final class JacocoMethodTestMapper {
         boolean testBytecodeReady = ensureTestBytecodeCurrent(
                 root, testModules, testOutputDirectories, failures);
 
-        Map<Path, Map<MethodKey, Set<MethodKey>>> testCallsByModule =
-                new LinkedHashMap<>();
+        Map<MethodKey, Set<MethodInvocation>> testCalls = new LinkedHashMap<>();
         Set<TestEntryPoint> testEntryPoints = new LinkedHashSet<>();
 
         if (testBytecodeReady) {
             for (Path moduleRoot : testModules) {
-                Map<MethodKey, Set<MethodKey>> moduleCalls =
-                        new LinkedHashMap<>();
                 Set<TestEntryPoint> moduleEntryPoints = new LinkedHashSet<>();
                 List<Path> existingOutputs = testOutputDirectories.get(moduleRoot)
                         .stream().filter(Files::isDirectory).toList();
@@ -243,9 +240,8 @@ public final class JacocoMethodTestMapper {
                     readTestBytecode(
                             existingOutputs,
                             moduleRoot,
-                            moduleCalls,
+                            testCalls,
                             moduleEntryPoints);
-                    testCallsByModule.put(moduleRoot, moduleCalls);
                     testEntryPoints.addAll(moduleEntryPoints);
                 }
             }
@@ -274,12 +270,27 @@ public final class JacocoMethodTestMapper {
                 applicationMethods(applicationGraph);
         Map<String, Set<String>> callsByApplicationMethod =
                 applicationCalls(applicationGraph);
+        Map<String, ApplicationClassInfo> applicationClassHierarchy =
+                applicationClassHierarchy(modules);
         Set<String> affectedSet = new LinkedHashSet<>(affectedMethods);
         Map<String, Set<Path>> modulesByTestClass = new LinkedHashMap<>();
         for (TestEntryPoint entryPoint : testEntryPoints) {
             modulesByTestClass.computeIfAbsent(
                     entryPoint.testClass(), ignored -> new LinkedHashSet<>())
                     .add(entryPoint.moduleRoot());
+        }
+
+        Map<String, Long> testMethodNameCounts = new LinkedHashMap<>();
+        for (TestEntryPoint entryPoint : testEntryPoints) {
+            String testClass = entryPoint.testClass().replace('/', '.');
+            if (modulesByTestClass.getOrDefault(
+                    entryPoint.testClass(), Set.of()).size() > 1) {
+                String moduleName = root.relativize(entryPoint.moduleRoot())
+                        .toString().replace('\\', '/');
+                testClass = moduleName + "::" + testClass;
+            }
+            testMethodNameCounts.merge(
+                    testClass + "#" + entryPoint.method().name(), 1L, Long::sum);
         }
 
         for (TestEntryPoint entryPoint : testEntryPoints) {
@@ -290,18 +301,22 @@ public final class JacocoMethodTestMapper {
                         .toString().replace('\\', '/');
                 testClass = moduleName + "::" + testClass;
             }
-            String testId = testClass
-                    + "#" + entryPoint.method().name();
+            String testMethod = entryPoint.method().name();
+            if (testMethodNameCounts.getOrDefault(
+                    testClass + "#" + testMethod, 0L) > 1) {
+                testMethod += entryPoint.method().descriptor();
+            }
+            String testId = testClass + "#" + testMethod;
 
             Set<String> reachedApplicationMethods = new LinkedHashSet<>();
             Map<String, List<String>> pathsByAffectedMethod = new LinkedHashMap<>();
 
             traceTestMethod(
                     entryPoint.method(),
-                    testCallsByModule.getOrDefault(
-                            entryPoint.moduleRoot(), Map.of()),
+                    testCalls,
                     applicationMethods,
                     callsByApplicationMethod,
+                    applicationClassHierarchy,
                     new HashSet<>(),
                     reachedApplicationMethods,
                     new ArrayList<>(),
@@ -529,13 +544,31 @@ public final class JacocoMethodTestMapper {
             return null;
         }
 
+        if (affectedMethod.startsWith("method:")) {
+            try {
+                byte[] decoded = java.util.Base64.getUrlDecoder()
+                        .decode(affectedMethod.substring("method:".length()));
+                String signature = new String(
+                        decoded, java.nio.charset.StandardCharsets.UTF_8);
+                int separator = signature.indexOf('#');
+                if (separator > 0) {
+                    return signature.substring(0, separator);
+                }
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+
         int descriptorStart = affectedMethod.indexOf('(');
         if (descriptorStart <= 0) {
             return null;
         }
 
         String methodPart = affectedMethod.substring(0, descriptorStart);
-        int separator = methodPart.lastIndexOf('.');
+        int separator = methodPart.lastIndexOf('#');
+        if (separator < 0) {
+            separator = methodPart.lastIndexOf('.');
+        }
         return separator <= 0 ? null : methodPart.substring(0, separator);
     }
 
@@ -829,7 +862,8 @@ public final class JacocoMethodTestMapper {
         }
 
         Map<String, InvokerGoal> goals = readPluginGoals(descriptor);
-        Map<String, String> classHierarchy = applicationClassHierarchy(modules);
+        Map<String, ApplicationClassInfo> classHierarchy =
+                applicationClassHierarchy(modules);
         Map<MethodKey, String> methods = applicationMethods(graph);
         Map<String, Set<String>> calls = applicationCalls(graph);
 
@@ -994,15 +1028,11 @@ public final class JacocoMethodTestMapper {
 
     private static List<MethodKey> goalEntryPoints(
             InvokerGoal goal,
-            Map<String, String> classHierarchy,
+            Map<String, ApplicationClassInfo> classHierarchy,
             Map<MethodKey, String> applicationMethods) {
 
-        Set<String> owners = new LinkedHashSet<>();
-        String owner = goal.implementation();
-
-        while (owner != null && !owner.isBlank() && owners.add(owner)) {
-            owner = classHierarchy.get(owner);
-        }
+        Set<String> owners = typeAndSupertypes(
+                goal.implementation(), classHierarchy);
 
         String expectedMethod = goal.report() ? "executeReport" : "execute";
 
@@ -1012,10 +1042,10 @@ public final class JacocoMethodTestMapper {
                 .toList();
     }
 
-    private static Map<String, String> applicationClassHierarchy(
+    private static Map<String, ApplicationClassInfo> applicationClassHierarchy(
             List<Path> modules) throws IOException {
 
-        Map<String, String> hierarchy = new LinkedHashMap<>();
+        Map<String, ApplicationClassInfo> hierarchy = new LinkedHashMap<>();
 
         for (Path module : modules) {
             Path classes = module.resolve("target/classes");
@@ -1040,7 +1070,39 @@ public final class JacocoMethodTestMapper {
                                             String signature,
                                             String superName,
                                             String[] interfaces) {
-                                        hierarchy.put(name, superName);
+                                        Set<String> parents = new LinkedHashSet<>();
+                                        if (superName != null && !superName.isBlank()) {
+                                            parents.add(superName);
+                                        }
+                                        if (interfaces != null) {
+                                            parents.addAll(List.of(interfaces));
+                                        }
+                                        currentClassName = name;
+                                        currentParents = parents;
+                                    }
+
+                                    private String currentClassName;
+                                    private Set<String> currentParents = Set.of();
+                                    private final Map<String, Integer> methodAccess =
+                                            new LinkedHashMap<>();
+
+                                    @Override
+                                    public MethodVisitor visitMethod(
+                                            int access,
+                                            String name,
+                                            String descriptor,
+                                            String signature,
+                                            String[] exceptions) {
+                                        methodAccess.put(name + descriptor, access);
+                                        return null;
+                                    }
+
+                                    @Override
+                                    public void visitEnd() {
+                                        hierarchy.put(
+                                                currentClassName,
+                                                new ApplicationClassInfo(
+                                                        currentParents, methodAccess));
                                     }
                                 },
                                 ClassReader.SKIP_CODE
@@ -1052,6 +1114,27 @@ public final class JacocoMethodTestMapper {
         }
 
         return hierarchy;
+    }
+
+    private static Set<String> typeAndSupertypes(
+            String type,
+            Map<String, ApplicationClassInfo> hierarchy) {
+        Set<String> visited = new LinkedHashSet<>();
+        ArrayDeque<String> pending = new ArrayDeque<>();
+        if (type != null && !type.isBlank()) {
+            pending.add(type);
+        }
+        while (!pending.isEmpty()) {
+            String current = pending.removeFirst();
+            if (!visited.add(current)) {
+                continue;
+            }
+            ApplicationClassInfo classInfo = hierarchy.get(current);
+            if (classInfo != null) {
+                pending.addAll(classInfo.parents());
+            }
+        }
+        return visited;
     }
 
     private static org.w3c.dom.Document readXml(Path file) throws IOException {
@@ -1194,7 +1277,7 @@ public final class JacocoMethodTestMapper {
     private static void readTestBytecode(
             List<Path> testClassesDirectories,
             Path moduleRoot,
-            Map<MethodKey, Set<MethodKey>> calls,
+            Map<MethodKey, Set<MethodInvocation>> calls,
             Set<TestEntryPoint> testEntryPoints) throws IOException {
         Map<String, TestClassInfo> testClassesByName = new LinkedHashMap<>();
 
@@ -1237,7 +1320,7 @@ public final class JacocoMethodTestMapper {
 
                                     MethodKey method =
                                             new MethodKey(className, name, descriptor);
-                                    Set<MethodKey> invokedMethods = calls.computeIfAbsent(
+                                    Set<MethodInvocation> invokedMethods = calls.computeIfAbsent(
                                             method, ignored -> new LinkedHashSet<>());
                                     TestMethodInfo methodInfo =
                                             new TestMethodInfo(method, access);
@@ -1260,17 +1343,15 @@ public final class JacocoMethodTestMapper {
                                                 String methodName,
                                                 String methodDescriptor,
                                                 boolean isInterface) {
-                                            invokedMethods.add(new MethodKey(
-                                                    owner, methodName, methodDescriptor));
+                                            invokedMethods.add(new MethodInvocation(
+                                                    new MethodKey(
+                                                            owner, methodName, methodDescriptor),
+                                                    opcode));
                                         }
 
                                         @Override
                                         public void visitEnd() {
                                             methods.put(method, methodInfo);
-                                            if (methodInfo.annotated) {
-                                                testEntryPoints.add(new TestEntryPoint(
-                                                        method, className, moduleRoot));
-                                            }
                                         }
 
                                         @Override
@@ -1304,12 +1385,13 @@ public final class JacocoMethodTestMapper {
         }
 
         for (TestClassInfo testClass : testClassesByName.values()) {
-            if ((testClass.access() & Opcodes.ACC_ABSTRACT) != 0
-                    || !extendsJUnit3TestCase(testClass, testClassesByName)) {
+            if ((testClass.access() & Opcodes.ACC_ABSTRACT) != 0) {
                 continue;
             }
 
-            Map<String, TestMethodInfo> inheritedTests = new LinkedHashMap<>();
+            boolean junit3Class = extendsJUnit3TestCase(
+                    testClass, testClassesByName);
+            Set<String> shadowedSignatures = new LinkedHashSet<>();
             String currentClass = testClass.internalName();
             Set<String> visited = new HashSet<>();
             while (currentClass != null && visited.add(currentClass)) {
@@ -1318,18 +1400,20 @@ public final class JacocoMethodTestMapper {
                     break;
                 }
                 for (TestMethodInfo method : current.methods().values()) {
-                    if (isJUnit3TestMethod(method)) {
-                        inheritedTests.putIfAbsent(
-                                method.method().name() + method.method().descriptor(),
-                                method);
+                    String signature = method.method().name()
+                            + method.method().descriptor();
+                    boolean visibleTest = method.annotated
+                            || (junit3Class && isJUnit3TestMethod(method));
+                    if (visibleTest && shadowedSignatures.add(signature)) {
+                        testEntryPoints.add(new TestEntryPoint(
+                                method.method(), testClass.internalName(), moduleRoot));
                     }
                 }
+                for (MethodKey method : current.methods().keySet()) {
+                    shadowedSignatures.add(
+                            method.name() + method.descriptor());
+                }
                 currentClass = current.superName();
-            }
-
-            for (TestMethodInfo test : inheritedTests.values()) {
-                testEntryPoints.add(new TestEntryPoint(
-                        test.method(), testClass.internalName(), moduleRoot));
             }
         }
     }
@@ -1361,17 +1445,19 @@ public final class JacocoMethodTestMapper {
 
     private static void collectMethodHandles(
             Object value,
-            Set<MethodKey> invokedMethods) {
+            Set<MethodInvocation> invokedMethods) {
 
         if (value instanceof Handle handle) {
             int tag = handle.getTag();
 
             if (tag >= Opcodes.H_INVOKEVIRTUAL
                     && tag <= Opcodes.H_INVOKEINTERFACE) {
-                invokedMethods.add(new MethodKey(
-                        handle.getOwner(),
-                        handle.getName(),
-                        handle.getDesc()));
+                invokedMethods.add(new MethodInvocation(
+                        new MethodKey(
+                                handle.getOwner(),
+                                handle.getName(),
+                                handle.getDesc()),
+                        tag));
             }
         } else if (value instanceof ConstantDynamic constant) {
             collectMethodHandles(constant.getBootstrapMethod(), invokedMethods);
@@ -1448,9 +1534,10 @@ public final class JacocoMethodTestMapper {
 
     private static void traceTestMethod(
             MethodKey method,
-            Map<MethodKey, Set<MethodKey>> testCalls,
+            Map<MethodKey, Set<MethodInvocation>> testCalls,
             Map<MethodKey, String> applicationMethods,
             Map<String, Set<String>> applicationCalls,
+            Map<String, ApplicationClassInfo> applicationClassHierarchy,
             Set<MethodKey> visitedTestMethods,
             Set<String> reachedApplicationMethods,
             List<String> testPath,
@@ -1474,21 +1561,80 @@ public final class JacocoMethodTestMapper {
                     testPath);
         } else {
             testPath.add(method.owner().replace('/', '.') + "#" + method.name());
-            for (MethodKey invokedMethod : testCalls.getOrDefault(method, Set.of())) {
-                traceTestMethod(
-                        invokedMethod,
-                        testCalls,
-                        applicationMethods,
-                        applicationCalls,
-                        visitedTestMethods,
-                        reachedApplicationMethods,
-                        testPath,
-                        visitedApplicationMethods,
-                        affectedMethods,
-                        pathsByAffectedMethod);
+            for (MethodInvocation invocation : testCalls.getOrDefault(method, Set.of())) {
+                Set<MethodKey> applicationTargets = resolveApplicationTargets(
+                        invocation, applicationMethods, applicationClassHierarchy);
+                if (applicationTargets.isEmpty()) {
+                    traceTestMethod(
+                            invocation.method(),
+                            testCalls,
+                            applicationMethods,
+                            applicationCalls,
+                            applicationClassHierarchy,
+                            visitedTestMethods,
+                            reachedApplicationMethods,
+                            testPath,
+                            visitedApplicationMethods,
+                            affectedMethods,
+                            pathsByAffectedMethod);
+                    continue;
+                }
+                for (MethodKey applicationTarget : applicationTargets) {
+                    traceApplicationMethod(
+                            applicationMethods.get(applicationTarget),
+                            applicationCalls,
+                            visitedApplicationMethods,
+                            reachedApplicationMethods,
+                            affectedMethods,
+                            pathsByAffectedMethod,
+                            testPath);
+                }
             }
             testPath.remove(testPath.size() - 1);
         }
+    }
+
+    private static Set<MethodKey> resolveApplicationTargets(
+            MethodInvocation invocation,
+            Map<MethodKey, String> applicationMethods,
+            Map<String, ApplicationClassInfo> classHierarchy) {
+        Set<MethodKey> targets = new LinkedHashSet<>();
+        MethodKey symbolicTarget = invocation.method();
+        if (applicationMethods.containsKey(symbolicTarget)) {
+            targets.add(symbolicTarget);
+        }
+        if (!invocation.isVirtualInvocation()) {
+            return targets;
+        }
+
+        for (MethodKey candidate : applicationMethods.keySet()) {
+            if (candidate.name().equals(symbolicTarget.name())
+                    && candidate.descriptor().equals(symbolicTarget.descriptor())
+                    && isInstanceDispatchTarget(
+                            candidate, symbolicTarget, classHierarchy)) {
+                targets.add(candidate);
+            }
+        }
+        return targets;
+    }
+
+    private static boolean isInstanceDispatchTarget(
+            MethodKey candidate,
+            MethodKey symbolicTarget,
+            Map<String, ApplicationClassInfo> classHierarchy) {
+        ApplicationClassInfo candidateClass = classHierarchy.get(candidate.owner());
+        if (candidateClass == null) {
+            return false;
+        }
+        int access = candidateClass.methodAccess().getOrDefault(
+                candidate.name() + candidate.descriptor(), Opcodes.ACC_STATIC);
+        if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE | Opcodes.ACC_ABSTRACT)) != 0) {
+            return false;
+        }
+        return typeAndSupertypes(candidate.owner(), classHierarchy)
+                        .contains(symbolicTarget.owner())
+                || typeAndSupertypes(symbolicTarget.owner(), classHierarchy)
+                        .contains(candidate.owner());
     }
 
     private static void traceApplicationMethod(
@@ -1538,6 +1684,23 @@ public final class JacocoMethodTestMapper {
     }
 
     private record MethodKey(String owner, String name, String descriptor) {
+    }
+
+    private record MethodInvocation(MethodKey method, int opcode) {
+        private boolean isVirtualInvocation() {
+            return opcode == Opcodes.INVOKEVIRTUAL
+                    || opcode == Opcodes.INVOKEINTERFACE
+                    || opcode == Opcodes.H_INVOKEVIRTUAL
+                    || opcode == Opcodes.H_INVOKEINTERFACE;
+        }
+    }
+
+    private record ApplicationClassInfo(
+            Set<String> parents, Map<String, Integer> methodAccess) {
+        private ApplicationClassInfo {
+            parents = Set.copyOf(parents);
+            methodAccess = Map.copyOf(methodAccess);
+        }
     }
 
     private record TestEntryPoint(
